@@ -1,1 +1,1 @@
-#Just testing
+#Triplet Loss model to study different spatial orientations of proteins
