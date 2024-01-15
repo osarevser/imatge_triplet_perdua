@@ -4,59 +4,54 @@ Created on Sat Dec  2 22:46:25 2023
 
 @author: Oscar
 """
-
 import matplotlib.pyplot as plt
 import numpy as np
 import tensorflow as tf
 import keras
-from keras import applications
+import configparser
+import pickle
 from keras import layers
-from keras import losses
-from keras import ops
 from keras import optimizers
-from keras import metrics
 from keras import Model
-from keras.applications import resnet
-from preprocessat import PreProcessat
 from tripletloss import DistanceLayer,SiameseModel
+from image_processing import preprocessing
+from embedding import create_embedding
+from keras.callbacks import EarlyStopping
 
-image_count=10240
-target_shape=(64,64,1)
+config=configparser.ConfigParser()
+config.read("config.ini")
 
-anchor=np.load("anchor.npy")
-positive=np.load("positive.npy")
-negative=np.load("negative.npy")
+version=int(config.get("Version","version"))
+path_to_npz=config.get("Paths","path_to_npz")
+train_val_ratio=float(config.get("Hyperparameters","train_val_ratio"))
+test_images_per_class=int(config.get("Hyperparameters","test_images_per_class"))
+train_val_triplets_per_class=int(config.get("Hyperparameters","train_val_triplets_per_class"))
+seed=int(config.get("Hyperparameters","seed"))
+architecture=config.get("Hyperparameters","architecture")
 
-anchor_dataset=tf.data.Dataset.from_tensor_slices(anchor)
-positive_dataset=tf.data.Dataset.from_tensor_slices(positive)
-negative_dataset=tf.data.Dataset.from_tensor_slices(negative)
+data=preprocessing(path_to_npz=path_to_npz,
+                   train_val_ratio=train_val_ratio,
+                   test_images_per_class=test_images_per_class,
+                   train_val_triplets_per_class=train_val_triplets_per_class,
+                   seed=seed)
+train_dataset=data.train_triplets
+validation_dataset=data.validation_triplets
+test_dataset=data.test_dataset
+np.save("versions/v"+str(version)+"_test_dataset.npy",test_dataset)
+image_shape=(64,64,1)
 
-dataset=tf.data.Dataset.zip((anchor_dataset,positive_dataset,negative_dataset))
+print("Summary:")
+print("N of classes:                  "+str(len(test_dataset)))
+print("Training triplets per class:   "+str(round(train_val_triplets_per_class*train_val_ratio)))
+print("Validation triplets per class: "+str(round(train_val_triplets_per_class*(1-train_val_ratio))))
+print("Total training triplets:       "+str(train_dataset[0].shape[0]))
+print("Total validation triplets:     "+str(validation_dataset[0].shape[0]))
 
-train_dataset=dataset.take(round(image_count*0.8))
-val_dataset=dataset.skip(round(image_count*0.8))
+embedding=create_embedding(image_shape=image_shape,len_test_dataset=len(test_dataset),architecture=architecture)
 
-train_dataset=train_dataset.batch(32,drop_remainder=False)
-val_dataset=val_dataset.batch(32,drop_remainder=False)
-
-embedding=keras.Sequential([layers.Input(shape=target_shape),
-                            layers.Conv2D(32,(7,7),activation="relu",padding="SAME"),
-                            layers.MaxPooling2D((2,2)),
-                            layers.Conv2D(64,(5,5),activation="relu",padding="SAME"),
-                            layers.MaxPooling2D((2,2)),
-                            layers.Conv2D(128,(3,3),activation="relu",padding="SAME"),
-                            layers.MaxPooling2D((2,2)),
-                            layers.Conv2D(256,(1,1),activation="relu",padding="SAME"),
-                            layers.MaxPooling2D((2,2)),
-                            layers.Conv2D(28,(1,1),activation=None,padding="SAME"),
-                            layers.MaxPooling2D((2,2)),
-                            layers.Flatten(),
-                            layers.Dense(64)],
-                           name="Embedding")
-
-anchor_input=layers.Input(name="anchor",shape=target_shape)
-positive_input=layers.Input(name="positive",shape=target_shape)
-negative_input=layers.Input(name="negative",shape=target_shape)
+anchor_input=layers.Input(name="anchor",shape=image_shape)
+positive_input=layers.Input(name="positive",shape=image_shape)
+negative_input=layers.Input(name="negative",shape=image_shape)
 
 distances=DistanceLayer()(embedding(anchor_input),
                           embedding(positive_input),
@@ -66,14 +61,48 @@ siamese_network=Model(inputs=[anchor_input,positive_input,negative_input],output
 
 siamese_model=SiameseModel(siamese_network)
 siamese_model.compile(optimizer=optimizers.Adam(0.0001))
-history=siamese_model.fit(train_dataset,epochs=25,validation_data=val_dataset)
+early_stopping=EarlyStopping(monitor="val_loss",
+                             min_delta=0.005,
+                             patience=3,
+                             mode="min",
+                             start_from_epoch=5,
+                             restore_best_weights=True)
+history=siamese_model.fit(train_dataset,
+                          epochs=2,
+                          validation_data=validation_dataset,
+                          callbacks=[early_stopping])
 
-#%%
-plt.figure()
+with open("versions/v"+str(version)+"_training_history.pkl","wb") as history_file:
+    pickle.dump(history.history,history_file)
+    history_file.close()
+
+plt.figure(figsize=(6,4.5))
 plt.ylabel("Loss")
 plt.xlabel("Epochs")
-plt.plot(history.history["loss"],label="training loss")
-plt.plot(history.history["val_loss"],label="validation loss")
+plt.plot(history.history["loss"],"r-+",label="training loss")
+plt.plot(history.history["val_loss"],"b-+",label="validation loss")
 plt.legend()
-#%%
-embedding.save("embedding.keras")
+plt.savefig("versions/v"+str(version)+"_loss.png",dpi=400)
+
+embedding.save("versions/v"+str(version)+"_embedding.keras")
+
+with open("versions/v"+str(version)+"_config.ini","w") as configfile:
+    config.write(configfile)
+    configfile.close()
+
+with open("versions/training_log.txt","a") as training_log:
+    training_log.write("Version:                       "+str(version)+"\n")
+    training_log.write("Dataset:                       "+path_to_npz+"\n")
+    training_log.write("Architecture:                  "+str(architecture)+"\n")
+    training_log.write("N of epochs:                   "+str(len(history.history["loss"]))+"\n")
+    training_log.write("Training triplets per class:   "+str(round(train_val_triplets_per_class*train_val_ratio))+"\n")
+    training_log.write("Validation triplets per class: "+str(round(train_val_triplets_per_class*(1-train_val_ratio)))+"\n")
+    training_log.write("Seed:                          "+str(seed)+"\n")
+    training_log.write("\n")
+    training_log.close()
+
+config.set("Version","version",str(version+1))
+
+with open("config.ini","w") as configfile:
+    config.write(configfile)
+    configfile.close()
