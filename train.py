@@ -68,7 +68,7 @@ early_stopping=EarlyStopping(monitor="val_loss",
                              start_from_epoch=5,
                              restore_best_weights=True)
 history=siamese_model.fit(train_dataset,
-                          epochs=2,
+                          epochs=999,
                           validation_data=validation_dataset,
                           callbacks=[early_stopping])
 
